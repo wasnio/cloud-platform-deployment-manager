@@ -7,10 +7,28 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	starlingxv1 "github.com/wind-river/cloud-platform-deployment-manager/api/v1"
 )
+
+var expectedResourceFilename string
+var expectedData []byte
+
+type MockSystemReconciler struct {
+	SystemReconciler
+}
+
+func (r *MockSystemReconciler) installCertificate(filename string, data []byte) error {
+	Expect(filename).To(Equal(expectedResourceFilename))
+	Expect(data).To(Equal(expectedData))
+	return nil
+}
 
 var _ = Describe("System controller", func() {
 
@@ -75,6 +93,57 @@ var _ = Describe("System controller", func() {
 			}
 			outCerts := clean_deprecated_certificates(certs)
 			Expect(outCerts).To(Equal(expOutCerts))
+		})
+	})
+
+	Context("Test installRooteCertificates", func() {
+		var (
+			scheme     *runtime.Scheme
+			instance   *starlingxv1.System
+			fakeClient client.Client
+			reconciler *MockSystemReconciler
+			fakeCert   []byte
+		)
+
+		BeforeEach(func() {
+			scheme = runtime.NewScheme()
+			corev1.AddToScheme(scheme)
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(starlingxv1.AddToScheme(scheme)).To(Succeed())
+
+			fakeCert = []byte("-----BEGIN CERTIFICATE-----\nFAKE-CERT\n-----END CERTIFICATE-----")
+
+			secret := &corev1.Secret{
+				ObjectMeta: v1.ObjectMeta{
+					Name:      RestAPICertName,
+					Namespace: DefaultRestCertSecretNamespace,
+				},
+				Data: map[string][]byte{
+					starlingxv1.SecretCaCertKey: fakeCert,
+				},
+			}
+
+			fakeClient = fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(secret).
+				Build()
+
+			instance = &starlingxv1.System{
+				ObjectMeta: v1.ObjectMeta{
+					Name:      "fake-system",
+					Namespace: "custom-namespace",
+				},
+			}
+
+			reconciler = &MockSystemReconciler{}
+			reconciler.Client = fakeClient
+			reconciler.Scheme = scheme
+
+		})
+
+		It("Should install certificates when crd are defined in a custom namesapce", func() {
+			expectedResourceFilename = "filename/blabla/blabla"
+			reconciler.installRootCertificates(instance)
 		})
 	})
 

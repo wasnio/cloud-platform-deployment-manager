@@ -73,7 +73,7 @@ const CertificateDirectory = "/etc/ssl/certs"
 
 const SystemFinalizerName = "system.finalizers.windriver.com"
 
-func InstallCertificate(filename string, data []byte) error {
+func (r *SystemReconciler) installCertificate(filename string, data []byte) error {
 	err := os.MkdirAll("/etc/ssl/certs", 0600)
 	if err != nil {
 		return err
@@ -120,7 +120,7 @@ func (r *SystemReconciler) installRootCertificates(instance *starlingxv1.System)
 		logSystem.Info("Continuing deployment without a CA certificate", "name", RestAPICertName)
 	} else {
 		filename := fmt.Sprintf("%s-%s-ca-cert.pem", DefaultRestCertSecretNamespace, RestAPICertName)
-		err = InstallCertificate(filename, caBytes)
+		err = r.installCertificate(filename, caBytes)
 		if err != nil {
 			logSystem.Error(err, "failed to install root certificate")
 			return err
