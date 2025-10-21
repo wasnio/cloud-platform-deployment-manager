@@ -5,7 +5,9 @@ package host
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/starlingx/inventory/v1/addresses"
@@ -1589,6 +1591,8 @@ func (r *HostReconciler) ReconcileVLANInterfaces(client *gophercloud.ServiceClie
 	return nil
 }
 
+const WORKERS = 3
+
 // ReconcileSRIOVInterfaces will update system interfaces to align with the
 // desired configuration.  It is assumed that the configuration will apply;
 // meaning that prior to invoking this function stale interfaces and stale
@@ -1607,10 +1611,14 @@ func (r *HostReconciler) ReconcileSRIOVInterfaces(client *gophercloud.ServiceCli
 		return nil
 	}
 
-	updated := false
-	networksUpdated := false
-	dataNetworksUpdated := false
-	ptpInterfaceUpdated := false
+	type eth struct {
+		opts    interfaces.InterfaceOpts
+		ethInfo starlingxv1.EthernetInfo
+		iface   *interfaces.Interface
+		ifuuid  string
+	}
+
+	ethList := []eth{}
 
 	for _, ethInfo := range profile.Interfaces.Ethernet {
 		// Only processing SRIOV Ethernet interfaces
@@ -1631,46 +1639,56 @@ func (r *HostReconciler) ReconcileSRIOVInterfaces(client *gophercloud.ServiceCli
 		}
 
 		if opts, ok := sriovUpdateRequired(ethInfo, iface, profile, host); ok {
-			logHost.Info("updating sriov ethernet interface", "uuid", ifuuid, "opts", opts)
-
-			_, err := interfaces.Update(client, ifuuid, opts).Extract()
-			if err != nil {
-				err = perrors.Wrapf(err, "failed to update interface: %s, %s",
-					ifuuid, common.FormatStruct(opts))
-				return err
-			}
-
-			r.NormalEvent(instance, common.ResourceUpdated,
-				"ethernet sriov interface %q has been updated", ethInfo.Name)
-
-			updated = true
+			eth := eth{opts: opts, ethInfo: ethInfo, iface: iface, ifuuid: ifuuid}
+			ethList = append(ethList, eth)
 		}
-
-		result, err := r.ReconcileInterfaceNetworks(client, instance, ethInfo.CommonInterfaceInfo, *iface, host)
-		if err != nil {
-			return err
-		}
-
-		networksUpdated = networksUpdated || result
-
-		result, err = r.ReconcileInterfaceDataNetworks(client, instance, ethInfo.CommonInterfaceInfo, *iface, host)
-		if err != nil {
-			return err
-		}
-
-		dataNetworksUpdated = dataNetworksUpdated || result
-
-		result, err = r.ReconcilePTPInterface(client, instance, ethInfo.CommonInterfaceInfo, *iface, host)
-		if err != nil {
-			return err
-		}
-
-		ptpInterfaceUpdated = ptpInterfaceUpdated || result
-
-		updated = updated || networksUpdated || dataNetworksUpdated || ptpInterfaceUpdated
 	}
 
-	if updated {
+	worker := func(eths []eth, wg *sync.WaitGroup) {
+		defer wg.Done()
+		for _, obj := range eths {
+			logHost.Info("updating sriov ethernet interface", "uuid", obj.ifuuid, "opts", obj.opts)
+			if _, err := interfaces.Update(client, obj.ifuuid, obj.opts).Extract(); err != nil {
+				logHost.Info("Failed to updated sriov", "sriov", obj.opts)
+			}
+			logHost.Info("sriov has been updated", "uuid", obj.ifuuid, "opts", obj.opts)
+		}
+	}
+
+	logHost.Info("updating sriov interfaces")
+	var wg sync.WaitGroup
+	for batch := range slices.Chunk(ethList, WORKERS) {
+		wg.Add(1)
+		go worker(batch, &wg)
+	}
+	wg.Wait()
+	logHost.Info("sriov interfaces have been updated")
+
+	networksUpdated := false
+	dataNetworksUpdated := false
+	ptpInterfaceUpdated := false
+
+	for _, ethObj := range ethList {
+		ethInfo := ethObj.ethInfo
+		iface := ethObj.iface
+
+		if ok, err := r.ReconcileInterfaceNetworks(client, instance, ethInfo.CommonInterfaceInfo, *iface, host); err != nil {
+			networksUpdated = networksUpdated || ok
+			return err
+		}
+
+		if ok, err := r.ReconcileInterfaceDataNetworks(client, instance, ethInfo.CommonInterfaceInfo, *iface, host); err != nil {
+			dataNetworksUpdated = dataNetworksUpdated || ok
+			return err
+		}
+
+		if ok, err := r.ReconcilePTPInterface(client, instance, ethInfo.CommonInterfaceInfo, *iface, host); err != nil {
+			ptpInterfaceUpdated = ptpInterfaceUpdated || ok
+			return err
+		}
+	}
+
+	if networksUpdated || dataNetworksUpdated || ptpInterfaceUpdated {
 		// Interfaces have been updated so we need to refresh the list of interfaces
 		// so that the next method that needs to act on the list will have the
 		// updated view of the system.
@@ -1735,6 +1753,13 @@ func (r *HostReconciler) ReconcileVFInterfaces(client *gophercloud.ServiceClient
 
 	updated := false
 
+	type vf struct {
+		opts    interfaces.InterfaceOpts
+		vfInfo starlingxv1.VFInfo
+		iface   *interfaces.Interface
+	}
+	vfs := []vf{}
+
 	for _, vfInfo := range profile.Interfaces.VF {
 		// For each configured vf interface create or update the related
 		// system resource.
@@ -1751,17 +1776,8 @@ func (r *HostReconciler) ReconcileVFInterfaces(client *gophercloud.ServiceClient
 			uses := []string{vfInfo.Lower}
 			opts.Uses = &uses
 
-			logHost.Info("creating sriov vf interface", "opts", opts)
-
-			iface, err = interfaces.Create(client, opts).Extract()
-			if err != nil {
-				err = perrors.Wrapf(err, "failed to create sriov vf interface: %s",
-					common.FormatStruct(opts))
-				return err
-			}
-
-			r.NormalEvent(instance, common.ResourceCreated,
-				"sriov vf interface %q has been created", vfInfo.Name)
+			vfObj := vf{opts: opts, vfInfo: vfInfo, iface: iface}
+			vfs = append(vfs, vfObj)
 
 			updated = true
 		} else {
@@ -1789,17 +1805,41 @@ func (r *HostReconciler) ReconcileVFInterfaces(client *gophercloud.ServiceClient
 			}
 		}
 
-		networksUpdated, err := r.ReconcileInterfaceNetworks(client, instance, vfInfo.CommonInterfaceInfo, *iface, host)
+
+	}
+
+	worker := func(vfs []vf, wg *sync.WaitGroup) {
+		defer wg.Done()
+		for _, obj := range vfs {
+			logHost.Info("creating sriov vf interface", "opts", obj.opts)
+			if iface, err = interfaces.Create(client, obj.opts).Extract(); err != nil {
+				logHost.Info("failed to create vf", "vf", obj.opts)
+			}
+			logHost.Info("sriov interface has been created", "opts", obj.opts)
+		}
+	}
+
+	logHost.Info("creating sriov vf interfaces")
+	var wg sync.WaitGroup
+	for batch := range slices.Chunk(vfs, WORKERS) {
+		wg.Add(1)
+		go worker(batch, &wg)
+	}
+	wg.Wait()
+	logHost.Info("sriov vf interfaces have been created")
+
+	for _, vfObj := range vfs {
+		networksUpdated, err := r.ReconcileInterfaceNetworks(client, instance, vfObj.vfInfo.CommonInterfaceInfo, *iface, host)
 		if err != nil {
 			return err
 		}
 
-		dataNetworksUpdated, err := r.ReconcileInterfaceDataNetworks(client, instance, vfInfo.CommonInterfaceInfo, *iface, host)
+		dataNetworksUpdated, err := r.ReconcileInterfaceDataNetworks(client, instance, vfObj.vfInfo.CommonInterfaceInfo, *iface, host)
 		if err != nil {
 			return err
 		}
 
-		ptpInterfaceUpdated, err := r.ReconcilePTPInterface(client, instance, vfInfo.CommonInterfaceInfo, *iface, host)
+		ptpInterfaceUpdated, err := r.ReconcilePTPInterface(client, instance, vfObj.vfInfo.CommonInterfaceInfo, *iface, host)
 		if err != nil {
 			return err
 		}
