@@ -16,7 +16,7 @@ import (
 	th "github.com/gophercloud/gophercloud/testhelper"
 	gcClient "github.com/gophercloud/gophercloud/testhelper/client"
 	starlingxv1 "github.com/wind-river/cloud-platform-deployment-manager/api/v1"
-	"github.com/wind-river/cloud-platform-deployment-manager/controllers/manager"
+	"github.com/wind-river/cloud-platform-deployment-manager/internal/controller/manager"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 

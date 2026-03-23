@@ -94,7 +94,7 @@ test: manifests generate fmt vet envtest ## Run tests.
 
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
-	go build -gcflags "${GOBUILD_GCFLAGS}" -o bin/manager main.go
+	go build -gcflags "${GOBUILD_GCFLAGS}" -o bin/manager cmd/main.go
 
 .PHONY: tools
 tools: generate fmt vet ## Build deployctl binary.
