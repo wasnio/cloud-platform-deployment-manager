@@ -455,6 +455,359 @@ var _ = Describe("HostProfileWebhook wrappers", func() {
 	})
 })
 
+var _ = Describe("validateChannelsInfo", func() {
+	intPtr := func(i int) *int { return &i }
+	strPtr := func(s string) *string { return &s }
+
+	Context("when interfaces is nil", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: nil,
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when PFChannels is set on an ethernet interface", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "eth0",
+									Class:      "platform",
+									PFChannels: intPtr(4),
+								},
+								Port: starlingxv1.EthernetPortInfo{Name: "ens1f0"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when PFChannels is set on a bond interface", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Bond: starlingxv1.BondList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "bond0",
+									Class:      "platform",
+									PFChannels: intPtr(2),
+								},
+								Mode:    "802.3ad",
+								Members: []string{"eth0", "eth1"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when VFChannels is set on pci-sriov ethernet with vf-driver netdevice", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "sriov0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(2),
+								},
+								VFDriver: strPtr("netdevice"),
+								Port:     starlingxv1.EthernetPortInfo{Name: "ens2f0"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when VFChannels is set on pci-sriov ethernet without vf-driver", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "sriov0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(2),
+								},
+								Port: starlingxv1.EthernetPortInfo{Name: "ens2f0"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels requires vf-driver to be 'netdevice'"))
+		})
+	})
+
+	Context("when VFChannels is set on pci-sriov ethernet with vf-driver not netdevice", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "sriov0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(2),
+								},
+								VFDriver: strPtr("vfio"),
+								Port:     starlingxv1.EthernetPortInfo{Name: "ens2f0"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels requires vf-driver to be 'netdevice'"))
+		})
+	})
+
+	Context("when VFChannels is set on a VF interface with vf-driver netdevice", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						VF: starlingxv1.VFList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "vf0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(4),
+								},
+								Lower:    "sriov0",
+								VFCount:  4,
+								VFDriver: strPtr("netdevice"),
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when VFChannels is set on a VF interface without vf-driver", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						VF: starlingxv1.VFList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "vf0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(4),
+								},
+								Lower:   "sriov0",
+								VFCount: 4,
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels requires vf-driver to be 'netdevice' for vf interfaces"))
+		})
+	})
+
+	Context("when VFChannels is set on a VF interface with vf-driver not netdevice", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						VF: starlingxv1.VFList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "vf0",
+									Class:      "pci-sriov",
+									VFChannels: intPtr(4),
+								},
+								Lower:    "sriov0",
+								VFCount:  4,
+								VFDriver: strPtr("vfio"),
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels requires vf-driver to be 'netdevice' for vf interfaces"))
+		})
+	})
+
+	Context("when VFChannels is set on a bond interface", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Bond: starlingxv1.BondList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "bond0",
+									Class:      "platform",
+									VFChannels: intPtr(2),
+								},
+								Mode:    "802.3ad",
+								Members: []string{"eth0", "eth1"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels is not applicable to bond (ae) interfaces"))
+		})
+	})
+
+	Context("when PFChannels is set on a VLAN interface", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						VLAN: starlingxv1.VLANList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "vlan100",
+									Class:      "platform",
+									PFChannels: intPtr(4),
+								},
+								Lower: "eth0",
+								VID:   100,
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("channels is not applicable to vlan interfaces"))
+		})
+	})
+
+	Context("when VFChannels is set on a VLAN interface", func() {
+		It("should return an error", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						VLAN: starlingxv1.VLANList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "vlan100",
+									Class:      "platform",
+									VFChannels: intPtr(2),
+								},
+								Lower: "eth0",
+								VID:   100,
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("sriov_vf_channels is not applicable to vlan interfaces"))
+		})
+	})
+
+	Context("when VFChannels is set on non-pci-sriov ethernet", func() {
+		It("should validate successfully (no check for non-pci-sriov)", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:       "eth0",
+									Class:      "platform",
+									VFChannels: intPtr(2),
+								},
+								Port: starlingxv1.EthernetPortInfo{Name: "ens1f0"},
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Context("when no channels are set on any interface", func() {
+		It("should validate successfully", func() {
+			obj := &starlingxv1.HostProfile{
+				Spec: starlingxv1.HostProfileSpec{
+					Interfaces: &starlingxv1.InterfaceInfo{
+						Ethernet: starlingxv1.EthernetList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:  "eth0",
+									Class: "platform",
+								},
+								Port: starlingxv1.EthernetPortInfo{Name: "ens1f0"},
+							},
+						},
+						Bond: starlingxv1.BondList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:  "bond0",
+									Class: "platform",
+								},
+								Mode:    "802.3ad",
+								Members: []string{"eth0", "eth1"},
+							},
+						},
+						VLAN: starlingxv1.VLANList{
+							{
+								CommonInterfaceInfo: starlingxv1.CommonInterfaceInfo{
+									Name:  "vlan100",
+									Class: "platform",
+								},
+								Lower: "eth0",
+								VID:   100,
+							},
+						},
+					},
+				},
+			}
+			err := validateChannelsInfo(obj)
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+})
+
 var _ = Describe("validateOVSAccessInfo", func() {
 	boolPtr := func(b bool) *bool { return &b }
 
