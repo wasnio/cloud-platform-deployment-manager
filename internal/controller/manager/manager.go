@@ -868,7 +868,9 @@ func (m *PlatformManager) ClearStrategy() {
 	if err != nil {
 		log.Error(err, "Set strategy applied sent false error")
 	}
+	namespace := m.strategyStatus.Namespace
 	m.strategyStatus = NewStrategyStatus()
+	m.strategyStatus.Namespace = namespace
 
 	// Reset strategy retry count
 	err = m.SetStrategyRetryCount(0)
@@ -901,6 +903,16 @@ func (m *PlatformManager) GetVimClient() *gophercloud.ServiceClient {
 		}
 	}
 	return m.vimClient
+}
+
+// ResetVimClient resets the cached VIM client so that a new one will be
+// created on the next call to GetVimClient(). This is necessary when
+// the VIM API returns HTTP 403 due to an expired Keystone token
+func (m *PlatformManager) ResetVimClient() {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	log.Info("resetting VIM client due to authentication error")
+	m.vimClient = nil
 }
 
 func (m *PlatformManager) IsPlatformNetworkReconciling() bool {
@@ -946,24 +958,84 @@ func (m *PlatformManager) GetStrategyExpectedByOtherReconcilers() bool {
 	return m.WaitForStrategySent
 }
 
+// isVimAuthError checks whether an error from the VIM API is an
+// authentication/authorization failure (HTTP 401 or 403). The VIM returns
+// 403 Forbidden when a Keystone token has expired, rather than the standard
+// 401 that gophercloud's AllowReauth handles automatically.
+func isVimAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.(type) {
+	case gophercloud.ErrDefault401, gophercloud.ErrDefault403:
+		return true
+	}
+	return false
+}
+
+// refreshVimClient resets the cached VIM client and rebuilds it with
+// fresh credentials. Returns the new client or an error if rebuild fails.
+func (m *PlatformManager) refreshVimClient() (*gophercloud.ServiceClient, error) {
+	m.ResetVimClient()
+	client := m.GetVimClient()
+	if client == nil {
+		return nil, perrors.New("failed to rebuild VIM client after authentication error")
+	}
+	return client, nil
+}
+
+// vimCallWithRetry executes a VIM API call and, if it fails with an
+// authentication error (401/403), refreshes the client and retries once.
+func (m *PlatformManager) vimCallWithRetry(
+	c *gophercloud.ServiceClient,
+	operation string,
+	fn func(*gophercloud.ServiceClient) (*systemconfigupdate.SystemConfigUpdate, error),
+) (*systemconfigupdate.SystemConfigUpdate, error) {
+	result, err := fn(c)
+	if isVimAuthError(err) {
+		log.Info("VIM authentication failed, refreshing client and retrying", "operation", operation)
+		newClient, refreshErr := m.refreshVimClient()
+		if refreshErr != nil {
+			return nil, refreshErr
+		}
+		result, err = fn(newClient)
+	}
+	return result, err
+}
+
 // GcCreate is wrapper function for systemconfigupdate Create
 func (m *PlatformManager) GcCreate(c *gophercloud.ServiceClient, opts systemconfigupdate.SystemConfigUpdateOpts) (*systemconfigupdate.SystemConfigUpdate, error) {
-	return systemconfigupdate.Create(c, opts)
+	return m.vimCallWithRetry(c, "create", func(client *gophercloud.ServiceClient) (*systemconfigupdate.SystemConfigUpdate, error) {
+		return systemconfigupdate.Create(client, opts)
+	})
 }
 
 // GcDelete is wrapper function for systemconfigupdate Delete
 func (m *PlatformManager) GcDelete(c *gophercloud.ServiceClient) (r systemconfigupdate.DeleteResult) {
-	return systemconfigupdate.Delete(c)
+	r = systemconfigupdate.Delete(c)
+	if isVimAuthError(r.ExtractErr()) {
+		log.Info("VIM authentication failed, refreshing client and retrying", "operation", "delete")
+		newClient, refreshErr := m.refreshVimClient()
+		if refreshErr != nil {
+			return r
+		}
+		r = systemconfigupdate.Delete(newClient)
+	}
+	return r
 }
 
 // GcActionStrategy is wrapper function for systemconfigupdate ActionStrategy
 func (m *PlatformManager) GcActionStrategy(c *gophercloud.ServiceClient, opts systemconfigupdate.StrategyActionOpts) (*systemconfigupdate.SystemConfigUpdate, error) {
-	return systemconfigupdate.ActionStrategy(c, opts)
+	return m.vimCallWithRetry(c, "action", func(client *gophercloud.ServiceClient) (*systemconfigupdate.SystemConfigUpdate, error) {
+		return systemconfigupdate.ActionStrategy(client, opts)
+	})
 }
 
 // GcShow is wrapper function for systemconfigupdate Show
 func (m *PlatformManager) GcShow(c *gophercloud.ServiceClient) (*systemconfigupdate.SystemConfigUpdate, error) {
-	return systemconfigupdate.Show(c)
+	return m.vimCallWithRetry(c, "show", func(client *gophercloud.ServiceClient) (*systemconfigupdate.SystemConfigUpdate, error) {
+		return systemconfigupdate.Show(client)
+	})
 }
 
 var instance CloudManager
